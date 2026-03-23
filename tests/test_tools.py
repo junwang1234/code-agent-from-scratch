@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from src.tools import MAX_READ_LINES, RepoFilesystem, ToolExecutionContext, ToolExecutor, build_default_tool_registry
 from src.tools.core import CommandToolResult, ReadFileRangeToolResult, TreeToolResult
@@ -76,6 +77,14 @@ class RepoFilesystemTest(unittest.TestCase):
     def test_shell_query_rg_files_lists_repo_relative_files(self) -> None:
         result = self.shell_runner.run("rg", ["--files", "src"])
         self.assertIn("src/auth.py", result.output)
+
+    def test_shell_query_rg_falls_back_when_rg_is_unavailable(self) -> None:
+        with patch("src.tools.shell.shutil.which", return_value=None):
+            result = self.shell_runner.run("rg", ["-n", "python|token", "README.md", "src/auth.py"])
+        joined = "\n".join(result.output)
+        self.assertIn("README.md:2:Use python src/auth.py to print the token.", joined)
+        self.assertIn("src/auth.py:2:    return 'token'", joined)
+        self.assertEqual(result.exit_code, 0)
 
     def test_shell_query_rejects_bad_flags_and_escaped_paths(self) -> None:
         with self.assertRaises(ValueError):

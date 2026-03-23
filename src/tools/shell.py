@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import fnmatch
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+
+from .repo_filesystem import IGNORED_DIRS
 
 
 ALLOWED_COMMANDS = {"rg", "find"}
@@ -159,7 +163,7 @@ class ShellQueryRunner:
 
     def _run_rg(self, args: list[str]) -> tuple[list[str], int]:
         if not shutil.which("rg"):
-            raise RuntimeError("rg is required for shell queries but is not installed.")
+            return self._run_rg_fallback(args)
         result = subprocess.run(["rg", *args], cwd=self.repo_path, capture_output=True, text=True, check=False)
         if result.returncode not in {0, 1}:
             raise RuntimeError(result.stderr.strip() or "rg failed.")
@@ -183,6 +187,104 @@ class ShellQueryRunner:
         if resolved.is_dir() and cleaned != ".":
             return cleaned.rstrip("/") + "/"
         return cleaned
+
+    def _run_rg_fallback(self, args: list[str]) -> tuple[list[str], int]:
+        if "--files" in args:
+            output = self._run_rg_files_fallback(args)
+            return output, 0
+        output = self._run_rg_search_fallback(args)
+        return output, 0 if output else 1
+
+    def _run_rg_files_fallback(self, args: list[str]) -> list[str]:
+        paths = [arg for arg in args if not arg.startswith("-")]
+        if not paths:
+            paths = ["."]
+        files = self._collect_search_files(paths)
+        return [path.as_posix() for path in files]
+
+    def _run_rg_search_fallback(self, args: list[str]) -> list[str]:
+        ignore_case = False
+        glob_pattern: str | None = None
+        pattern: str | None = None
+        paths: list[str] = []
+        expect_value_for: str | None = None
+        end_of_flags = False
+
+        for arg in args:
+            if expect_value_for is not None:
+                if expect_value_for == "--glob":
+                    glob_pattern = arg
+                elif expect_value_for not in {"-C", "-A", "-B", "-m"}:
+                    raise ValueError(f"Unsupported rg fallback flag: {expect_value_for}")
+                expect_value_for = None
+                continue
+            if not end_of_flags and arg == "--":
+                end_of_flags = True
+                continue
+            if not end_of_flags and arg.startswith("-"):
+                if arg == "-i":
+                    ignore_case = True
+                    continue
+                if arg in RG_VALUE_FLAGS:
+                    expect_value_for = arg
+                    continue
+                if arg == "-n":
+                    continue
+                raise ValueError(f"Unsupported rg fallback flag: {arg}")
+            if pattern is None:
+                pattern = arg
+            else:
+                paths.append(arg)
+
+        if expect_value_for is not None:
+            raise ValueError(f"Missing value for rg fallback flag: {expect_value_for}")
+        if pattern is None:
+            raise ValueError("rg requires a pattern argument.")
+
+        flags = re.IGNORECASE if ignore_case else 0
+        regex = re.compile(pattern, flags)
+        output: list[str] = []
+        for rel_path in self._collect_search_files(paths or ["."]):
+            if glob_pattern and not fnmatch.fnmatch(rel_path.as_posix(), glob_pattern):
+                continue
+            file_path = self.repo_path / rel_path
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+            for line_number, line in enumerate(content.splitlines(), start=1):
+                if regex.search(line):
+                    output.append(f"{rel_path.as_posix()}:{line_number}:{line}")
+        return output
+
+    def _collect_search_files(self, paths: list[str]) -> list[Path]:
+        collected: list[Path] = []
+        seen: set[str] = set()
+        for path_arg in paths:
+            resolved = (self.repo_path / path_arg).resolve()
+            if self.repo_path not in resolved.parents and resolved != self.repo_path:
+                raise ValueError(f"Path escapes repository root: {path_arg}")
+            if resolved.is_file():
+                rel_file = resolved.relative_to(self.repo_path)
+                rel_key = rel_file.as_posix()
+                if rel_key not in seen:
+                    seen.add(rel_key)
+                    collected.append(rel_file)
+                continue
+            if not resolved.exists() or not resolved.is_dir():
+                continue
+            for item in sorted(resolved.rglob("*")):
+                if any(part in IGNORED_DIRS for part in item.relative_to(self.repo_path).parts):
+                    continue
+                if not item.is_file():
+                    continue
+                rel_file = item.relative_to(self.repo_path)
+                rel_key = rel_file.as_posix()
+                if rel_key in seen:
+                    continue
+                seen.add(rel_key)
+                collected.append(rel_file)
+        return collected
 
 
 class SafeCommandRunner:
