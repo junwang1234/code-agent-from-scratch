@@ -71,6 +71,7 @@ class CommandResult:
     output: list[str]
     truncated: bool
     exit_code: int
+    execution_mode: str = "bounded"
 
 
 class ShellQueryRunner:
@@ -327,7 +328,7 @@ class SafeCommandRunner:
         truncated = len(output) > self.max_output_lines
         if truncated:
             output = output[: self.max_output_lines]
-        return CommandResult(command=safe_command, args=safe_args, output=output, truncated=truncated, exit_code=result.returncode)
+        return CommandResult(command=safe_command, args=safe_args, output=output, truncated=truncated, exit_code=result.returncode, execution_mode="bounded")
 
     def run_argv(self, argv: list[str], *, working_dir: str = ".", env_overrides: dict[str, str] | None = None) -> CommandResult:
         if not argv:
@@ -338,7 +339,7 @@ class SafeCommandRunner:
         truncated = len(output) > self.max_output_lines
         if truncated:
             output = output[: self.max_output_lines]
-        return CommandResult(command=safe_command, args=safe_args, output=output, truncated=truncated, exit_code=result.returncode)
+        return CommandResult(command=safe_command, args=safe_args, output=output, truncated=truncated, exit_code=result.returncode, execution_mode="bounded")
 
     def run_tests(self, runner: str, targets: list[str] | None = None, extra_args: list[str] | None = None) -> CommandResult:
         safe_runner = runner.strip()
@@ -353,6 +354,37 @@ class SafeCommandRunner:
 
     def run_validation_command(self, argv: list[str], *, working_dir: str = ".", env_overrides: dict[str, str] | None = None) -> CommandResult:
         return self.run_argv(argv, working_dir=working_dir, env_overrides=env_overrides)
+
+    def run_approved_bash(self, argv: list[str], *, working_dir: str = ".", env_overrides: dict[str, str] | None = None) -> CommandResult:
+        if not argv:
+            raise ValueError("command argv may not be empty.")
+        safe_argv = [item.strip() for item in argv]
+        if any(not item for item in safe_argv):
+            raise ValueError("command argv may not contain empty values.")
+        cwd = self._resolve_working_dir(working_dir)
+        env = {**os.environ, **env_overrides} if env_overrides else None
+        rendered = render_argv_as_shell_command(safe_argv)
+        result = subprocess.run(
+            ["/bin/bash", "-lc", rendered],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=self.timeout_sec,
+            env=env,
+        )
+        output = [line for line in (result.stdout + result.stderr).splitlines() if line.strip()]
+        truncated = len(output) > self.max_output_lines
+        if truncated:
+            output = output[: self.max_output_lines]
+        return CommandResult(
+            command=safe_argv[0],
+            args=safe_argv[1:],
+            output=output,
+            truncated=truncated,
+            exit_code=result.returncode,
+            execution_mode="approved_bash",
+        )
 
     def format_code(self, formatter: str, paths: list[str], check_only: bool = False) -> CommandResult:
         safe_formatter = formatter.strip()
@@ -648,3 +680,7 @@ class SafeCommandRunner:
 
 def format_shell_query(command: str, args: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in [command, *args])
+
+
+def render_argv_as_shell_command(argv: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in argv)

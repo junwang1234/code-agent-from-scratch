@@ -1,4 +1,5 @@
 from .actions import Action, FinishPayload, MemoryUpdates, ToolCall
+from .approval import ApprovalRequest, ApprovedCommandScope, InstallSuggestion
 from .artifacts import (
     ActionExecutionError,
     EvidenceItem,
@@ -24,6 +25,8 @@ from .validation import (
 __all__ = [
     "Action",
     "ActionExecutionError",
+    "ApprovalRequest",
+    "ApprovedCommandScope",
     "DiscoveredCommand",
     "EvidenceItem",
     "FactItem",
@@ -40,6 +43,7 @@ __all__ = [
     "RepoMapEntry",
     "RunOutcome",
     "SessionState",
+    "InstallSuggestion",
     "StructuredPlan",
     "SuccessCriterionStatus",
     "Task",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 from unittest.mock import patch
 
-from src.models import Action, ActionExecutionError, FactItem, FinishPayload, ToolCall, SuccessCriterionStatus, Task
+from src.models import Action, ActionExecutionError, FactItem, FinishPayload, SuccessCriterionStatus, Task, ToolCall
 from src.presentation.responder import render_markdown
 from src.presentation.runtime_reporter import RuntimeReporter
 from src.runtime.action_execution import ActionExecutor
@@ -13,6 +13,12 @@ from src.runtime.result_composer import compose_response
 from src.tools import RepoFilesystem
 
 from tests.helpers import RepoTestCase, ScriptedPolicy, make_edit_plan, make_finish_action, make_plan, make_tool_action, strip_ansi
+
+
+def _approved_bash_result(argv: list[str]) -> object:
+    from src.tools.shell import CommandResult
+
+    return CommandResult(command=argv[0], args=argv[1:], output=["ok"], truncated=False, exit_code=0, execution_mode="approved_bash")
 
 
 class RuntimeOrchestratorTest(RepoTestCase):
@@ -468,3 +474,91 @@ class RuntimeOrchestratorTest(RepoTestCase):
         self.assertIn("[plan] step_1 pending", output)
         self.assertIn("[summary] completed", output)
         self.assertIn("[summary] elapsed: 1.2s", output)
+
+    def test_runtime_approves_and_retries_unsupported_validation_command_with_bash(self) -> None:
+        plan = make_edit_plan("Run bun tests")
+        actions = [
+            make_tool_action(step_id="step_3", tool_name="run_tests", tool_input={"argv": ["bun", "run", "test:unit"]}, reason="Run the project test command."),
+        ] + [make_finish_action(step_id="step_4", reason="Done.", answer="Validated with bun.")] * 4
+        runtime = AgentRuntime(step_budget=5, planner=ScriptedPolicy(plan, actions), approval_handler=lambda request: True)
+        with patch("src.runtime.validation.failures.shutil.which", return_value="/usr/local/bin/bun"), patch(
+            "src.tools.shell.SafeCommandRunner.run_approved_bash",
+            return_value=_approved_bash_result(["bun", "run", "test:unit"]),
+        ) as approved_bash:
+            response = runtime.run(Task(repo_path=self.repo, question="Run bun tests"))
+        self.assertIn("Validated with bun.", response.primary_text)
+        self.assertEqual(runtime.approved_command_scopes[0].argv, ["bun", "run", "test:unit"])
+        approved_bash.assert_called_once()
+
+    def test_runtime_denial_records_failure_and_continues(self) -> None:
+        plan = make_edit_plan("Run bun tests")
+        actions = [
+            make_tool_action(step_id="step_3", tool_name="run_tests", tool_input={"argv": ["bun", "run", "test:unit"]}, reason="Run the project test command."),
+        ] + [make_finish_action(step_id="step_4", reason="Done.", answer="Skipped validation after denial.")] * 4
+        stream = io.StringIO()
+        runtime = AgentRuntime(
+            step_budget=5,
+            planner=ScriptedPolicy(plan, actions),
+            reporter=RuntimeReporter(stream=stream, level="normal"),
+            approval_handler=lambda request: False,
+        )
+        with patch("src.runtime.validation.failures.shutil.which", return_value="/usr/local/bin/bun"):
+            response = runtime.run(Task(repo_path=self.repo, question="Run bun tests"))
+        self.assertIn("Skipped validation after denial.", response.primary_text)
+        self.assertIn("approval_denied", stream.getvalue())
+
+    def test_runtime_install_flow_runs_install_verify_and_retry(self) -> None:
+        plan = make_edit_plan("Run bun tests")
+        actions = [
+            make_tool_action(
+                step_id="step_3",
+                tool_name="run_tests",
+                tool_input={
+                    "argv": ["bun", "run", "test:unit"],
+                    "install_argv": ["brew", "install", "bun"],
+                    "verify_argv": ["bun", "--version"],
+                },
+                reason="Run the project test command.",
+            ),
+        ] + [make_finish_action(step_id="step_4", reason="Done.", answer="Installed bun and validated.")] * 4
+        runtime = AgentRuntime(step_budget=5, planner=ScriptedPolicy(plan, actions), approval_handler=lambda request: True)
+        observed_argv: list[list[str]] = []
+
+        def _fake_bash(self, argv, *, working_dir=".", env_overrides=None):
+            observed_argv.append(list(argv))
+            return _approved_bash_result(argv)
+
+        with patch("src.runtime.validation.failures.shutil.which", return_value=None), patch("src.tools.shell.SafeCommandRunner.run_approved_bash", new=_fake_bash):
+            response = runtime.run(Task(repo_path=self.repo, question="Run bun tests"))
+        self.assertIn("Installed bun and validated.", response.primary_text)
+        self.assertEqual(observed_argv[0], ["brew", "install", "bun"])
+        self.assertEqual(observed_argv[1], ["bun", "--version"])
+        self.assertEqual(observed_argv[2], ["bun", "run", "test:unit"])
+
+    def test_runtime_install_flow_accepts_agent_proposed_install_command(self) -> None:
+        plan = make_edit_plan("Run foobar tests")
+        actions = [
+            make_tool_action(
+                step_id="step_3",
+                tool_name="run_tests",
+                tool_input={
+                    "argv": ["foobar", "test"],
+                    "install_argv": ["brew", "install", "foobar"],
+                    "verify_argv": ["foobar", "--version"],
+                },
+                reason="Run the project test command.",
+            ),
+        ] + [make_finish_action(step_id="step_4", reason="Done.", answer="Installed foobar and validated.")] * 4
+        runtime = AgentRuntime(step_budget=5, planner=ScriptedPolicy(plan, actions), approval_handler=lambda request: True)
+        observed_argv: list[list[str]] = []
+
+        def _fake_bash(self, argv, *, working_dir=".", env_overrides=None):
+            observed_argv.append(list(argv))
+            return _approved_bash_result(argv)
+
+        with patch("src.runtime.validation.failures.shutil.which", return_value=None), patch("src.tools.shell.SafeCommandRunner.run_approved_bash", new=_fake_bash):
+            response = runtime.run(Task(repo_path=self.repo, question="Run foobar tests"))
+        self.assertIn("Installed foobar and validated.", response.primary_text)
+        self.assertEqual(observed_argv[0], ["brew", "install", "foobar"])
+        self.assertEqual(observed_argv[1], ["foobar", "--version"])
+        self.assertEqual(observed_argv[2], ["foobar", "test"])

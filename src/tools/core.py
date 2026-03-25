@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from ..models import ValidationDiscoveryState, WriteResult
+from ..models import ApprovalRequest, ValidationDiscoveryState, WriteResult
 from .repo_filesystem import RepoFilesystem
 from .shell import CommandResult, SafeCommandRunner, ShellQueryResult, ShellQueryRunner
 
@@ -15,6 +15,12 @@ class ToolExecutionContext:
     shell_runner: ShellQueryRunner
     command_runner: SafeCommandRunner
     validation_service: Any
+
+
+class ApprovalRequiredError(Exception):
+    def __init__(self, request: ApprovalRequest) -> None:
+        super().__init__(request.reason or "Explicit approval is required.")
+        self.request = request
 
 
 @dataclass(slots=True)

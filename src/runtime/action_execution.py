@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from ..models import Action, TaskResult
+from ..models import Action, ApprovalRequest, TaskResult
 from ..presentation.runtime_reporter import RuntimeReporter
 from ..tools import ToolExecutor, build_default_tool_registry
+from ..tools.core import ApprovalRequiredError
 from ..tools.registry import ToolRegistry
 from .action_normalizer import ProposalNormalizer
 from .action_outcomes import CommandObservationOutcome, ToolOutcomeAdapter, WriteObservationOutcome
@@ -29,6 +30,12 @@ class ActionExecutionFailed(Exception):
         self.retryable = retryable
 
 
+class ApprovalRequired(Exception):
+    def __init__(self, request: ApprovalRequest) -> None:
+        super().__init__(request.reason or "Explicit approval is required.")
+        self.request = request
+
+
 class ActionExecutor:
     def __init__(self, repo_path, reporter: RuntimeReporter | None = None, registry: ToolRegistry | None = None, normalizer: ProposalNormalizer | None = None) -> None:
         self.reporter = reporter
@@ -46,15 +53,19 @@ class ActionExecutor:
     def execute(self, memory: AgentMemory, action: Action) -> TaskResult | None:
         return self.execute_command(memory, command_from_action(action))
 
-    def execute_command(self, memory: AgentMemory, command: ExecutionCommand) -> TaskResult | None:
+    def execute_command(self, memory: AgentMemory, command: ExecutionCommand, *, apply_updates: bool = True) -> TaskResult | None:
         action = action_from_command(command)
-        memory.apply_action_updates(action)
+        if apply_updates:
+            memory.apply_action_updates(action)
         if action.kind == "finish":
             memory.apply_finish(action)
             return compose_response(memory)
         if not action.tool_name:
             raise ValueError("Tool action is missing tool_name.")
-        outcome = self.tool_executor.execute(action.tool_name, action.tool_input)
+        try:
+            outcome = self.tool_executor.execute(action.tool_name, action.tool_input)
+        except ApprovalRequiredError as exc:
+            raise ApprovalRequired(exc.request) from exc
         executable_outcome = self.outcome_adapter.adapt(outcome)
         result = executable_outcome.apply(memory)
         self._report_outcome(memory, executable_outcome)

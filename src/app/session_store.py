@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from ..models import FactItem, TaskResult
+from ..models import ApprovedCommandScope, FactItem, TaskResult
 
 
 HISTORY_DIRNAME = ".history"
@@ -30,6 +30,7 @@ class InteractiveSession:
     facts: list[FactItem] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     validation_runs: list[str] = field(default_factory=list)
+    approved_command_scopes: list[ApprovedCommandScope] = field(default_factory=list)
     last_result_summary: str = ""
     last_unknowns: list[str] = field(default_factory=list)
 
@@ -109,6 +110,15 @@ def load_session(path: Path) -> InteractiveSession | None:
         ],
         changed_files=[str(item) for item in payload.get("changed_files", [])],
         validation_runs=[str(item) for item in payload.get("validation_runs", [])],
+        approved_command_scopes=[
+            ApprovedCommandScope(
+                argv=[str(arg) for arg in item.get("argv", [])],
+                working_dir=str(item.get("working_dir", ".")),
+                match_type=str(item.get("match_type", "exact")),
+                execution_mode=str(item.get("execution_mode", "approved_bash")),
+            )
+            for item in payload.get("approved_command_scopes", [])
+        ],
         last_result_summary=str(payload.get("last_result_summary", "")),
         last_unknowns=[str(item) for item in payload.get("last_unknowns", [])],
     )

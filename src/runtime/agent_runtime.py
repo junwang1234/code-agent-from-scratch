@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 import time
+from typing import Callable
 
-from ..models import RunOutcome, Task, TaskResult
+from ..models import ApprovalRequest, ApprovedCommandScope, RunOutcome, Task, TaskResult
 from ..planning.base import BasePlanner
 from ..presentation.runtime_reporter import RuntimeReporter
+from ..tools.shell import render_argv_as_shell_command
 from .action_execution import ActionExecutionFailed as _ActionExecutionFailed
+from .action_execution import ApprovalRequired as _ApprovalRequired
 from .action_execution import ActionExecutor
 from .execution_commands import action_from_command, command_from_action
 from .turn_artifacts import build_turn_artifacts
@@ -25,12 +28,29 @@ class AgentRuntime:
         reporter: RuntimeReporter | None = None,
         trace_enabled: bool = False,
         event_sink: RuntimeEventSink | None = None,
+        approval_handler: Callable[[ApprovalRequest], bool] | None = None,
     ) -> None:
         self.step_budget = max(4, step_budget)
         self.planner = planner
         self.reporter = reporter
         self.trace_enabled = trace_enabled
         self.event_sink = event_sink
+        self.approval_handler = approval_handler
+        self.approved_command_scopes: list[ApprovedCommandScope] = []
+
+    def set_approval_handler(self, handler: Callable[[ApprovalRequest], bool] | None) -> None:
+        self.approval_handler = handler
+
+    def set_approved_command_scopes(self, scopes: list[ApprovedCommandScope]) -> None:
+        self.approved_command_scopes = [
+            ApprovedCommandScope(
+                argv=list(item.argv),
+                working_dir=item.working_dir,
+                match_type=item.match_type,
+                execution_mode=item.execution_mode,
+            )
+            for item in scopes
+        ]
 
     def run(self, task: Task) -> TaskResult:
         return self.run_with_artifacts(task).result
@@ -56,7 +76,17 @@ class AgentRuntime:
         return plan
 
     def _build_memory(self, task: Task, plan) -> AgentMemory:
-        return AgentMemory.create(task, plan)
+        memory = AgentMemory.create(task, plan)
+        memory.state.approved_command_scopes = [
+            ApprovedCommandScope(
+                argv=list(item.argv),
+                working_dir=item.working_dir,
+                match_type=item.match_type,
+                execution_mode=item.execution_mode,
+            )
+            for item in self.approved_command_scopes
+        ]
+        return memory
 
     def _run_step_loop(self, memory: AgentMemory, executor: ActionExecutor) -> TaskResult | None:
         for remaining_steps in range(self.step_budget, 0, -1):
@@ -91,12 +121,95 @@ class AgentRuntime:
     def _execute_step(self, memory: AgentMemory, executor: ActionExecutor, command, action) -> TaskResult | None:
         try:
             return executor.execute_command(memory, command)
+        except _ApprovalRequired as exc:
+            return self._handle_approval_request(memory, executor, command, action, exc.request)
         except _ActionExecutionFailed as exc:
             self._handle_action_failure(memory, action, exc)
             return None
         except (ValueError, RuntimeError) as exc:
             self._handle_action_failure(memory, action, _classify_action_exception(action, exc))
             return None
+
+    def _handle_approval_request(self, memory: AgentMemory, executor: ActionExecutor, command, action, request: ApprovalRequest) -> TaskResult | None:
+        try:
+            if self._is_approved(request):
+                return self._retry_with_approved_bash(memory, executor, command)
+            approved = self.approval_handler(request) if self.approval_handler is not None else False
+            if not approved:
+                error = _ActionExecutionFailed(
+                    failure_kind="approval_denied" if self.approval_handler is not None else "approval_required",
+                    message=f"Approval denied for command: {render_argv_as_shell_command(request.argv)}",
+                    raw_output=[render_argv_as_shell_command(request.argv)],
+                    retryable=False,
+                )
+                self._handle_action_failure(memory, action, error)
+                return None
+            if request.install_suggestion is not None:
+                install_result = executor.tool_executor.command_runner.run_approved_bash(
+                    request.install_suggestion.argv,
+                    working_dir=request.install_suggestion.working_dir,
+                )
+                if install_result.exit_code != 0:
+                    raise _ActionExecutionFailed(
+                        failure_kind="install_failed",
+                        message=f"{render_argv_as_shell_command(request.install_suggestion.argv)} exited with code {install_result.exit_code}.",
+                        raw_output=install_result.output,
+                        retryable=False,
+                    )
+                if request.install_suggestion.verify_argv:
+                    verify_result = executor.tool_executor.command_runner.run_approved_bash(request.install_suggestion.verify_argv)
+                    if verify_result.exit_code != 0:
+                        raise _ActionExecutionFailed(
+                            failure_kind="install_failed",
+                            message=f"Installed tool verification failed: {render_argv_as_shell_command(request.install_suggestion.verify_argv)}",
+                            raw_output=verify_result.output,
+                            retryable=False,
+                        )
+            self._remember_approved_scope(request)
+            memory.state.approved_command_scopes = [
+                ApprovedCommandScope(
+                    argv=list(item.argv),
+                    working_dir=item.working_dir,
+                    match_type=item.match_type,
+                    execution_mode=item.execution_mode,
+                )
+                for item in self.approved_command_scopes
+            ]
+            return self._retry_with_approved_bash(memory, executor, command)
+        except _ActionExecutionFailed as exc:
+            self._handle_action_failure(memory, action, exc)
+            return None
+        except (ValueError, RuntimeError) as exc:
+            self._handle_action_failure(memory, action, _classify_action_exception(action, exc))
+            return None
+
+    def _retry_with_approved_bash(self, memory: AgentMemory, executor: ActionExecutor, command):
+        approved_command = deepcopy(command)
+        if hasattr(approved_command, "tool_input"):
+            approved_command.tool_input = {**approved_command.tool_input, "_approved_bash": True}
+        return executor.execute_command(memory, approved_command, apply_updates=False)
+
+    def _is_approved(self, request: ApprovalRequest) -> bool:
+        for scope in self.approved_command_scopes:
+            if scope.working_dir != request.working_dir:
+                continue
+            if scope.match_type == "exact" and scope.argv == request.argv:
+                return True
+            if scope.match_type == "prefix" and request.argv[: len(scope.argv)] == scope.argv:
+                return True
+        return False
+
+    def _remember_approved_scope(self, request: ApprovalRequest) -> None:
+        if self._is_approved(request):
+            return
+        self.approved_command_scopes.append(
+            ApprovedCommandScope(
+                argv=list(request.argv),
+                working_dir=request.working_dir,
+                match_type="exact",
+                execution_mode="approved_bash",
+            )
+        )
 
     def _handle_action_failure(self, memory: AgentMemory, action, error) -> None:
         self._record_event(

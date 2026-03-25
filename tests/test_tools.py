@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from src.runtime.validation import ValidationDiscoveryService
 from src.tools import MAX_READ_LINES, RepoFilesystem, ToolExecutionContext, ToolExecutor, build_default_tool_registry
-from src.tools.core import CommandToolResult, ReadFileRangeToolResult, TreeToolResult
+from src.tools.core import ApprovalRequiredError, CommandToolResult, ReadFileRangeToolResult, TreeToolResult
 from src.tools.shell import CommandResult, SafeCommandRunner, ShellQueryRunner, format_shell_query
 
 
@@ -29,6 +29,12 @@ class StubCommandRunner:
         self.last_working_dir = "."
         self.last_env = None
         return CommandResult(command=command, args=args, output=["ok"], truncated=False, exit_code=0)
+
+    def run_approved_bash(self, argv: list[str], *, working_dir: str = ".", env_overrides: dict[str, str] | None = None) -> CommandResult:
+        self.last_argv = list(argv)
+        self.last_working_dir = working_dir
+        self.last_env = env_overrides
+        return CommandResult(command=argv[0], args=argv[1:], output=["ok"], truncated=False, exit_code=0, execution_mode="approved_bash")
 
     def run_tests(self, runner: str, targets: list[str] | None = None, extra_args: list[str] | None = None) -> CommandResult:
         return self.run("python", ["-m", runner, *(targets or []), *(extra_args or [])])
@@ -144,6 +150,12 @@ class RepoFilesystemTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(any("test_truth" in line for line in result.output))
 
+    def test_safe_command_runner_runs_approved_bash_argv(self) -> None:
+        result = self.command_runner.run_approved_bash([sys.executable, "-c", "print(123)"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.execution_mode, "approved_bash")
+        self.assertIn("123", "\n".join(result.output))
+
     def test_default_tool_registry_exposes_tool_specs(self) -> None:
         registry = build_default_tool_registry()
         self.assertIn("list_tree", registry.names())
@@ -222,7 +234,7 @@ class RepoFilesystemTest(unittest.TestCase):
         self.assertEqual(stub_runner.last_argv, [".venv/bin/python", "-m", "ruff", "check", "."])
         self.assertIsNotNone(command_result.discovery_state)
 
-    def test_run_command_tool_blocks_explicit_setup_command_without_approval(self) -> None:
+    def test_run_command_tool_requests_approval_for_explicit_setup_command(self) -> None:
         registry = build_default_tool_registry()
         context = ToolExecutionContext(
             repo_filesystem=self.tools,
@@ -230,11 +242,51 @@ class RepoFilesystemTest(unittest.TestCase):
             command_runner=self.command_runner,
             validation_service=self.validation_service,
         )
-        with self.assertRaisesRegex(ValueError, "Explicit approval required"):
+        with self.assertRaises(ApprovalRequiredError) as caught:
             registry.get("run_command").execute(
                 context,
                 {"argv": ["python", "-m", "pip", "install", "-r", "requirements.txt"]},
             )
+        self.assertEqual(caught.exception.request.argv[:4], ["python", "-m", "pip", "install"])
+
+    def test_run_tests_tool_requests_approval_for_bun_command(self) -> None:
+        registry = build_default_tool_registry()
+        context = ToolExecutionContext(
+            repo_filesystem=self.tools,
+            shell_runner=self.shell_runner,
+            command_runner=self.command_runner,
+            validation_service=self.validation_service,
+        )
+        with self.assertRaises(ApprovalRequiredError) as caught:
+            registry.get("run_tests").execute(
+                context,
+                {"argv": ["bun", "run", "test:unit"]},
+            )
+        self.assertEqual(caught.exception.request.argv, ["bun", "run", "test:unit"])
+
+    def test_run_tests_tool_uses_agent_proposed_install_when_tool_is_missing(self) -> None:
+        registry = build_default_tool_registry()
+        context = ToolExecutionContext(
+            repo_filesystem=self.tools,
+            shell_runner=self.shell_runner,
+            command_runner=self.command_runner,
+            validation_service=self.validation_service,
+        )
+        with patch("src.runtime.validation.failures.shutil.which", return_value=None):
+            with self.assertRaises(ApprovalRequiredError) as caught:
+                registry.get("run_tests").execute(
+                    context,
+                    {
+                        "argv": ["foobar", "test"],
+                        "install_argv": ["brew", "install", "foobar"],
+                        "verify_argv": ["foobar", "--version"],
+                    },
+                )
+        self.assertIsNotNone(caught.exception.request.install_suggestion)
+        assert caught.exception.request.install_suggestion is not None
+        self.assertEqual(caught.exception.request.install_suggestion.argv, ["brew", "install", "foobar"])
+        self.assertEqual(caught.exception.request.install_suggestion.verify_argv, ["foobar", "--version"])
+        self.assertEqual(caught.exception.request.install_suggestion.source, "agent_proposed")
 
     def test_format_code_tool_discovers_formatter_command(self) -> None:
         registry = build_default_tool_registry()

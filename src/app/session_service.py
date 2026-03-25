@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from ..models import ApprovedCommandScope
 from ..planning.base import BasePlanner
 from .session_store import (
     InteractiveSession,
@@ -47,9 +48,18 @@ class InteractiveSessionService:
     def session_id(self, planner: BasePlanner) -> str | None:
         return planner.get_session_id()
 
-    def record_outcome(self, active_session: ActiveSession, *, user_request: str, outcome, planner: BasePlanner) -> None:
+    def record_outcome(
+        self,
+        active_session: ActiveSession,
+        *,
+        user_request: str,
+        outcome,
+        planner: BasePlanner,
+        approved_command_scopes: list[ApprovedCommandScope] | None = None,
+    ) -> None:
         active_session.session.record_turn(user_request, outcome.result, outcome.artifacts.facts)
         active_session.session.session_id = self.session_id(planner)
+        active_session.session.approved_command_scopes = list(approved_command_scopes or active_session.session.approved_command_scopes)
         save_session(active_session.save_path, active_session.session)
 
     def _prepare_session(

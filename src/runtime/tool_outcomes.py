@@ -141,7 +141,8 @@ def apply_command_outcome(memory: AgentMemory, *, tool_name: str, result: Comman
     from .observation_analysis import summarize_test_result
 
     rendered = format_shell_query(result.command, result.args)
-    summary = f"{rendered} exited with code {result.exit_code} and produced {len(result.output)} line(s)."
+    mode_suffix = " via approved bash" if result.execution_mode == "approved_bash" else ""
+    summary = f"{rendered}{mode_suffix} exited with code {result.exit_code} and produced {len(result.output)} line(s)."
     if tool_name == "run_tests":
         test_summary = summarize_test_result(result)
         if test_summary:
@@ -153,7 +154,7 @@ def apply_command_outcome(memory: AgentMemory, *, tool_name: str, result: Comman
         summary=summary,
         highlights=highlights,
         raw_output=result.output,
-        metadata={"command": result.command, "args": result.args, "exit_code": result.exit_code, "truncated": result.truncated, "line_count": len(result.output)},
+        metadata={"command": result.command, "args": result.args, "exit_code": result.exit_code, "truncated": result.truncated, "line_count": len(result.output), "execution_mode": result.execution_mode},
         validation_note=summary,
         success=result.exit_code == 0,
     )

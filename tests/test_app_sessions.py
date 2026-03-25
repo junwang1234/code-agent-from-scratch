@@ -4,6 +4,7 @@ import io
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from src.app.main import build_parser, run_interactive
 from src.app.session_store import InteractiveSession, SessionTurn, find_session_by_id, list_sessions, load_session, save_session
@@ -11,8 +12,9 @@ from src.app.task_builder import build_context_prefix, build_task_question
 from src.models import FactItem, SuccessCriterionStatus
 from src.presentation.runtime_reporter import RuntimeReporter
 from src.runtime.agent_runtime import AgentRuntime
+from src.tools.shell import CommandResult
 
-from tests.helpers import RepoTestCase, ScriptedPolicy, make_finish_action, make_plan, make_tool_action
+from tests.helpers import RepoTestCase, ScriptedPolicy, make_edit_plan, make_finish_action, make_plan, make_tool_action
 
 
 class AppSessionsTest(RepoTestCase):
@@ -258,3 +260,61 @@ class AppSessionsTest(RepoTestCase):
         )
         self.assertEqual(exit_code, 0)
         self.assertEqual(list_sessions(self.repo), [])
+
+    def test_interactive_mode_prompts_for_approval_and_persists_exact_command_scope(self) -> None:
+        plan = make_edit_plan("Run bun tests")
+        policy = ScriptedPolicy(
+            plan,
+            [
+                make_tool_action(step_id="step_3", tool_name="run_tests", tool_input={"argv": ["bun", "run", "test:unit"]}, reason="Run the project test command."),
+            ] + [make_finish_action(step_id="step_4", reason="Done.", answer="Validated with bun.")] * 4,
+        )
+        output = io.StringIO()
+        with patch("src.runtime.validation.failures.shutil.which", return_value="/usr/local/bin/bun"), patch(
+            "src.tools.shell.SafeCommandRunner.run_approved_bash",
+            return_value=CommandResult(command="bun", args=["run", "test:unit"], output=["ok"], truncated=False, exit_code=0, execution_mode="approved_bash"),
+        ):
+            exit_code = run_interactive(
+                self.repo,
+                runtime=AgentRuntime(step_budget=5, planner=policy, reporter=RuntimeReporter(stream=output, level="quiet")),
+                input_stream=io.StringIO("Run bun tests\ny\nquit\n"),
+                output_stream=output,
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("[approval] Run repo command with approved bash?", output.getvalue())
+        saved_sessions = list_sessions(self.repo)
+        self.assertEqual(len(saved_sessions), 1)
+        saved = load_session(saved_sessions[0].path)
+        assert saved is not None
+        self.assertEqual(saved.approved_command_scopes[0].argv, ["bun", "run", "test:unit"])
+
+    def test_interactive_mode_labels_agent_proposed_install_source(self) -> None:
+        plan = make_edit_plan("Run bun tests")
+        policy = ScriptedPolicy(
+            plan,
+            [
+                make_tool_action(
+                    step_id="step_3",
+                    tool_name="run_tests",
+                    tool_input={
+                        "argv": ["bun", "run", "test:unit"],
+                        "install_argv": ["brew", "install", "bun"],
+                        "verify_argv": ["bun", "--version"],
+                    },
+                    reason="Run the project test command.",
+                ),
+            ] + [make_finish_action(step_id="step_4", reason="Done.", answer="Validated with bun.")] * 4,
+        )
+        output = io.StringIO()
+        with patch("src.runtime.validation.failures.shutil.which", return_value=None), patch(
+            "src.tools.shell.SafeCommandRunner.run_approved_bash",
+            return_value=CommandResult(command="bun", args=["run", "test:unit"], output=["ok"], truncated=False, exit_code=0, execution_mode="approved_bash"),
+        ):
+            exit_code = run_interactive(
+                self.repo,
+                runtime=AgentRuntime(step_budget=5, planner=policy, reporter=RuntimeReporter(stream=output, level="quiet")),
+                input_stream=io.StringIO("Run bun tests\ny\nquit\n"),
+                output_stream=output,
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("[approval] install source: agent_proposed", output.getvalue())

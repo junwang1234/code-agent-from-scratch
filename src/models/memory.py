@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .approval import ApprovedCommandScope
 from .artifacts import ActionExecutionError, EvidenceItem, FactItem, FileContext, FileSnippet, Observation, RepoMapEntry, SuccessCriterionStatus
 from .plan import StructuredPlan
 from .task import Task
@@ -29,6 +30,7 @@ class SessionState:
     edit_history: list[str] = field(default_factory=list)
     validation_runs: list[str] = field(default_factory=list)
     validation_discovery: ValidationDiscoveryState | None = None
+    approved_command_scopes: list[ApprovedCommandScope] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     action_failures: list[ActionExecutionError] = field(default_factory=list)
     last_action_failure: ActionExecutionError | None = None
