@@ -39,7 +39,7 @@ class PlanningPromptBuilder:
                 "You are the policy engine for a bounded repository agent.\n"
                 "Do not inspect or edit the repository directly. Choose exactly one validated local tool call or finish.\n"
                 "Let the user request and current evidence determine whether this run is exploratory or edit-oriented. Do not assume a fixed mode.\n"
-                "Read or search relevant files before writing. Validate after code changes when feasible. If enough evidence exists, finish.\n"
+                "Read or search relevant files before writing. Validate after code changes when feasible. If validation discovery already exposes a selected test, lint, or format command, prefer that runtime-selected command instead of inventing one. If no validation command is selected yet, you may call run_tests, run_command, or format_code without argv so the runtime can discover the default command. Use explicit argv only when the repository evidence clearly supports it. If enough evidence exists, finish.\n"
                 "Avoid duplicate reads, repeated broad searches, and early finish with weak evidence.\n"
                 "If the last tool call failed, use the structured failure context to decide the next action.\n"
                 "Do not repeat the identical failing action unless the error suggests a bounded correction.\n"

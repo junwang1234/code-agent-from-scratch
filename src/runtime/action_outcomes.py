@@ -6,8 +6,16 @@ from dataclasses import dataclass
 from ..models import TaskResult
 from ..tools.core import CommandToolResult, HeadFileToolResult, ReadFileRangeToolResult, ShellToolResult, TreeToolResult, WriteToolResult
 from ..tools.shell import format_shell_query
+from .validation.failures import VALIDATION_TOOL_NAMES, validation_failure_kind
 from .memory_manager import AgentMemory
-from .tool_outcomes import apply_command_outcome, apply_file_range_outcome, apply_head_file_outcome, apply_shell_outcome, apply_tree_outcome, apply_write_outcome
+from .tool_outcomes import (
+    apply_command_outcome,
+    apply_file_range_outcome,
+    apply_head_file_outcome,
+    apply_shell_outcome,
+    apply_tree_outcome,
+    apply_write_outcome,
+)
 
 
 class ExecutableOutcome(ABC):
@@ -80,17 +88,24 @@ class WriteObservationOutcome(ExecutableOutcome):
 class CommandObservationOutcome(ExecutableOutcome):
     tool_name: str
     result: object
+    discovery_state: object | None = None
 
     def apply(self, memory: AgentMemory) -> TaskResult | None:
-        apply_command_outcome(memory, tool_name=self.tool_name, result=self.result)
+        apply_command_outcome(memory, tool_name=self.tool_name, result=self.result, discovery_state=self.discovery_state)
         if self.result.exit_code != 0:
             from .action_execution import ActionExecutionFailed
 
+            failure_kind = "nonzero_exit"
+            retryable = False
+            if self.tool_name in VALIDATION_TOOL_NAMES:
+                failure_message = "\n".join(self.result.output[:12]) or f"{format_shell_query(self.result.command, self.result.args)} exited with code {self.result.exit_code}."
+                failure_kind = validation_failure_kind(self.tool_name, failure_message)
+                retryable = failure_kind == "timeout"
             raise ActionExecutionFailed(
-                failure_kind="nonzero_exit",
+                failure_kind=failure_kind,
                 message=f"{format_shell_query(self.result.command, self.result.args)} exited with code {self.result.exit_code}.",
                 raw_output=self.result.output,
-                retryable=False,
+                retryable=retryable,
             )
         return None
 
@@ -113,5 +128,5 @@ class ToolOutcomeAdapter:
         if isinstance(outcome, WriteToolResult):
             return WriteObservationOutcome(outcome.tool_name, outcome.write_result, outcome.summary)
         if isinstance(outcome, CommandToolResult):
-            return CommandObservationOutcome(outcome.tool_name, outcome.result)
+            return CommandObservationOutcome(outcome.tool_name, outcome.result, discovery_state=outcome.discovery_state)
         raise ValueError(f"Unsupported tool result: {type(outcome).__name__}")

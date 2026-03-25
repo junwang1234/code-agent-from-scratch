@@ -6,9 +6,20 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from src.runtime.observation_analysis import summarize_test_result as _summarize_test_result
+from src.models import DiscoveredCommand, Task, ValidationCommand, ValidationDiscoveryState
 from src.presentation.runtime_reporter import ANSI_BOLD, ANSI_CYAN, ANSI_DIM, ANSI_GREEN, ANSI_RED, ANSI_RESET, RuntimeReporter
+from src.runtime.memory_manager import create_memory
 from src.tools import RepoFilesystem
+from tests.helpers import make_edit_plan
+
+
+def _discovered(kind: str, argv: list[str], *, source: str = "repo-hint") -> DiscoveredCommand:
+    return DiscoveredCommand(
+        kind=kind,
+        command=ValidationCommand(kind=kind, argv=argv),
+        source=source,
+        confidence=0.9,
+    )
 
 
 class RuntimeReporterDiffTest(unittest.TestCase):
@@ -102,21 +113,28 @@ class RuntimeReporterDiffTest(unittest.TestCase):
         self.assertIn("step_2", output)
         self.assertIn("completed", output)
 
-    def test_summarize_test_result_reports_tested_and_passed_counts_for_unittest_ok(self) -> None:
-        summarize = __import__("src.runtime.observation_analysis", fromlist=["summarize_test_result"]).summarize_test_result
-        result = SimpleNamespace(output=["......", "----------------------------------------------------------------------", "Ran 6 tests in 0.006s", "", "OK"])
+    def test_report_finish_includes_selected_validation_commands_and_blockers(self) -> None:
+        stream = io.StringIO()
+        reporter = RuntimeReporter(stream=stream)
+        memory = create_memory(Task(repo_path=self.repo, question="Patch auth flow"), make_edit_plan("Patch auth flow"))
+        memory.state.changed_files.add("src/sample.py")
+        memory.state.validation_discovery = ValidationDiscoveryState(
+            repo_fingerprint="repo123",
+            selected_test=_discovered("test", ["python", "-m", "unittest", "discover", "-s", "tests", "-v"], source="python-tests-layout"),
+            blockers=["repo-local virtualenv is not available"],
+        )
+        response = SimpleNamespace(
+            result_kind="edit",
+            changed_files=["src/sample.py"],
+            validation=["Selected test command: python -m unittest discover -s tests -v via python-tests-layout."],
+            risks=["Validation blockers: repo-local virtualenv is not available."],
+        )
 
-        summary = summarize(result)
+        reporter.report_finish(memory.state, response, elapsed_seconds=1.2)
 
-        self.assertEqual(summary, "Test results: 6 tested, 6 passed.")
-
-    def test_summarize_test_result_reports_tested_count_for_failures(self) -> None:
-        summarize = __import__("src.runtime.observation_analysis", fromlist=["summarize_test_result"]).summarize_test_result
-        result = SimpleNamespace(output=["F..", "----------------------------------------------------------------------", "Ran 3 tests in 0.004s", "", "FAILED (failures=1)"])
-
-        summary = summarize(result)
-
-        self.assertEqual(summary, "Test results: 3 tested, failures present.")
+        output = stream.getvalue()
+        self.assertIn("[summary] selected test: python -m unittest discover -s tests -v via python-tests-layout", output)
+        self.assertIn("[summary] validation blockers: repo-local virtualenv is not available", output)
 
 
 if __name__ == "__main__":

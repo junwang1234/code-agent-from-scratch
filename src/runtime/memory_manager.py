@@ -15,6 +15,7 @@ from ..models import (
     StructuredPlan,
     SuccessCriterionStatus,
     Task,
+    ValidationDiscoveryState,
 )
 
 
@@ -379,6 +380,11 @@ class AgentMemory:
         self.compact()
         return failure
 
+    def record_validation_discovery_state(self, discovery_state: ValidationDiscoveryState | None) -> None:
+        if discovery_state is None:
+            return
+        self.state.validation_discovery = discovery_state
+
 
 def reduce_memory(memory: AgentMemory) -> None:
     _reduce_memory_state(memory.state)
@@ -423,6 +429,7 @@ def build_snapshot_prompt_state(memory: AgentMemory, remaining_steps: int) -> di
         "patch_ready_files": [item.path for item in file_contexts if item.patch_ready][:6],
         "changed_files": sorted(state.changed_files)[-8:],
         "edit_history": state.edit_history[-6:],
+        "validation_discovery": _serialize_validation_discovery(state.validation_discovery),
         "validation_runs": state.validation_runs[-4:],
         "failures": state.failures[-4:],
         "recent_action_failures": [_serialize_action_failure(item) for item in state.action_failures[-3:]],
@@ -452,6 +459,7 @@ def build_incremental_prompt_state(memory: AgentMemory, remaining_steps: int) ->
         "latest_observation": _serialize_observation(latest_observation) if latest_observation is not None else None,
         "latest_changed_files": sorted(state.changed_files)[-4:],
         "latest_edit_note": state.edit_history[-1] if state.edit_history else "",
+        "validation_discovery": _serialize_validation_discovery(state.validation_discovery),
         "latest_validation_run": state.validation_runs[-1] if state.validation_runs else "",
         "latest_failure": state.failures[-1] if state.failures else "",
         "latest_action_failure": _serialize_action_failure(state.last_action_failure),
@@ -560,13 +568,14 @@ def _serialize_file_context(context: FileContext) -> dict:
 
 
 def _serialize_observation(observation) -> dict:
+    raw_output_tools = {"list_tree", "head_file", "rg_probe", "rg_search", "rg_files", "find_paths", "list_files", "read_file_range", "search_code", "run_command", "run_tests", "format_code"}
     return {
         "tool": observation.tool,
         "tool_input": observation.tool_input,
         "result_summary": observation.result_summary,
         "highlights": observation.highlights,
-        "raw_output": observation.raw_output if observation.tool in {"list_tree", "head_file", "rg_probe", "rg_search", "rg_files", "find_paths", "list_files", "read_file_range", "search_code", "run_command", "run_tests", "format_code"} else [],
-        "metadata": observation.metadata if observation.tool in {"list_tree", "head_file", "rg_probe", "rg_search", "rg_files", "find_paths", "list_files", "read_file_range", "search_code", "run_command", "run_tests", "format_code"} else {},
+        "raw_output": observation.raw_output if observation.tool in raw_output_tools else [],
+        "metadata": observation.metadata if observation.tool in raw_output_tools else {},
     }
 
 
@@ -584,3 +593,11 @@ def _serialize_action_failure(failure) -> dict | None:
         "attempt_index": failure.attempt_index,
         "retryable": failure.retryable,
     }
+
+
+def _serialize_validation_discovery(discovery_state: ValidationDiscoveryState | None) -> dict | None:
+    if discovery_state is None:
+        return None
+    from ..runtime.validation.state import summarize_discovery_state
+
+    return summarize_discovery_state(discovery_state)

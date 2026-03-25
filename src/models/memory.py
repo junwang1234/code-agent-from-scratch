@@ -6,6 +6,7 @@ from typing import Any
 from .artifacts import ActionExecutionError, EvidenceItem, FactItem, FileContext, FileSnippet, Observation, RepoMapEntry, SuccessCriterionStatus
 from .plan import StructuredPlan
 from .task import Task
+from .validation import ValidationDiscoveryState
 
 
 @dataclass(slots=True)
@@ -27,6 +28,7 @@ class SessionState:
     changed_files: set[str] = field(default_factory=set)
     edit_history: list[str] = field(default_factory=list)
     validation_runs: list[str] = field(default_factory=list)
+    validation_discovery: ValidationDiscoveryState | None = None
     failures: list[str] = field(default_factory=list)
     action_failures: list[ActionExecutionError] = field(default_factory=list)
     last_action_failure: ActionExecutionError | None = None

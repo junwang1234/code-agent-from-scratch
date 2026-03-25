@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from ..models import WriteResult
+from ..models import ValidationDiscoveryState, WriteResult
 from .repo_filesystem import RepoFilesystem
 from .shell import CommandResult, SafeCommandRunner, ShellQueryResult, ShellQueryRunner
 
@@ -14,6 +14,7 @@ class ToolExecutionContext:
     repo_filesystem: RepoFilesystem
     shell_runner: ShellQueryRunner
     command_runner: SafeCommandRunner
+    validation_service: Any
 
 
 @dataclass(slots=True)
@@ -64,6 +65,7 @@ class WriteToolResult:
 class CommandToolResult:
     tool_name: str
     result: CommandResult
+    discovery_state: ValidationDiscoveryState | None = None
 
 
 ToolResult = TreeToolResult | HeadFileToolResult | ReadFileRangeToolResult | ShellToolResult | WriteToolResult | CommandToolResult

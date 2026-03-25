@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..models import RepoMapEntry, SessionState, TaskResult
 from .memory_manager import AgentMemory
+from .validation.state import collect_validation_blockers, summarize_discovered_command
 
 
 EDITISH_TOOLS = {"write_file", "apply_patch", "run_command", "run_tests", "format_code"}
@@ -43,8 +44,8 @@ def _compose_edit_result(memory: SessionState) -> TaskResult:
         if progress:
             summary += f" Last recorded progress: {progress}"
     changed_files = sorted(memory.changed_files)[:12]
-    validation = memory.validation_runs[:8] or ["No validation runs were recorded."]
-    risks = memory.failures[:8] or memory.unknowns[:8] or ["No validation failures were recorded."]
+    validation = _compose_validation_summary(memory)
+    risks = _compose_validation_risks(memory)
     return TaskResult(result_kind="edit", primary_text=summary, changed_files=changed_files, validation=validation, risks=risks)
 
 
@@ -98,3 +99,36 @@ def _is_edit_run(memory: SessionState) -> bool:
         if any(tool in EDITISH_TOOLS for tool in step.allowed_tools):
             return True
     return False
+
+
+def _compose_validation_summary(memory: SessionState) -> list[str]:
+    items: list[str] = []
+    discovery = memory.validation_discovery
+    if discovery is not None:
+        selected_test = summarize_discovered_command(discovery.selected_test)
+        selected_lint = summarize_discovered_command(discovery.selected_lint)
+        selected_format = summarize_discovered_command(discovery.selected_format)
+        if selected_test:
+            items.append(f"Selected test command: {selected_test}.")
+        if selected_lint:
+            items.append(f"Selected lint command: {selected_lint}.")
+        if selected_format:
+            items.append(f"Selected format command: {selected_format}.")
+    items.extend(memory.validation_runs[:8])
+    return items[:8] or ["No validation runs were recorded."]
+
+
+def _compose_validation_risks(memory: SessionState) -> list[str]:
+    items: list[str] = []
+    blockers = collect_validation_blockers(memory.validation_discovery)
+    if blockers:
+        items.append(f"Validation blockers: {'; '.join(blockers)}.")
+    items.extend(memory.failures[:8] or memory.unknowns[:8])
+    if not items:
+        return ["No validation failures were recorded."]
+    deduped: list[str] = []
+    for item in items:
+        if item in deduped:
+            continue
+        deduped.append(item)
+    return deduped[:8]

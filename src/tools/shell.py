@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import fnmatch
+import os
 from pathlib import Path
 import re
 import shlex
@@ -19,13 +20,39 @@ ALLOWED_FIND_FLAGS = {"-maxdepth", "-type", "-name"}
 FIND_VALUE_FLAGS = {"-maxdepth", "-type", "-name"}
 DISALLOWED_ARG_TOKENS = {";", "&&", "||", "`", "$(", ">", ">>", "<"}
 
-ALLOWED_EXECUTABLES = {"python", "python3", "pytest", "ruff", "black", ".venv/bin/python"}
-ALLOWED_PYTHON_MODULES = {"unittest", "pytest", "ruff", "black"}
+ALLOWED_EXECUTABLES = {
+    "python",
+    "python3",
+    "python3.10",
+    "python3.11",
+    "python3.12",
+    "go",
+    "cargo",
+    "npm",
+    "pnpm",
+    "yarn",
+    "mvn",
+    "gradle",
+    "./gradlew",
+    "./mvnw",
+    "pytest",
+    "ruff",
+    "black",
+    ".venv/bin/python",
+    "venv/bin/python",
+    ".venv/Scripts/python.exe",
+    "venv/Scripts/python.exe",
+}
+ALLOWED_PYTHON_MODULES = {"unittest", "pytest", "ruff", "black", "venv", "pip"}
 ALLOWED_PYTEST_FLAGS = {"-q", "-v", "-vv", "-x", "--maxfail", "-k"}
 PYTEST_VALUE_FLAGS = {"--maxfail", "-k"}
 ALLOWED_RUFF_SUBCOMMANDS = {"check", "format"}
 ALLOWED_RUFF_FLAGS = {"--fix", "--diff", "--check"}
 ALLOWED_BLACK_FLAGS = {"--check", "--diff", "--quiet"}
+ALLOWED_PIP_INSTALL_FLAGS = {"-r", "--requirement", "-e", "--editable"}
+WRAPPER_EXECUTABLES = {"./gradlew", "./mvnw"}
+PACKAGE_MANAGERS = {"npm", "pnpm", "yarn"}
+BUILD_TOOL_EXECUTABLES = {"mvn", "gradle", *WRAPPER_EXECUTABLES}
 
 
 @dataclass(slots=True)
@@ -295,8 +322,18 @@ class SafeCommandRunner:
 
     def run(self, command: str, args: list[str]) -> CommandResult:
         safe_command, safe_args = self._validate(command, args)
-        executable = sys.executable if safe_command in {"python", "python3"} else safe_command
-        result = subprocess.run([executable, *safe_args], cwd=self.repo_path, capture_output=True, text=True, check=False, timeout=self.timeout_sec)
+        result = self._execute(safe_command, safe_args, working_dir=".")
+        output = [line for line in (result.stdout + result.stderr).splitlines() if line.strip()]
+        truncated = len(output) > self.max_output_lines
+        if truncated:
+            output = output[: self.max_output_lines]
+        return CommandResult(command=safe_command, args=safe_args, output=output, truncated=truncated, exit_code=result.returncode)
+
+    def run_argv(self, argv: list[str], *, working_dir: str = ".", env_overrides: dict[str, str] | None = None) -> CommandResult:
+        if not argv:
+            raise ValueError("command argv may not be empty.")
+        safe_command, safe_args = self._validate(argv[0], argv[1:])
+        result = self._execute(safe_command, safe_args, working_dir=working_dir, env_overrides=env_overrides)
         output = [line for line in (result.stdout + result.stderr).splitlines() if line.strip()]
         truncated = len(output) > self.max_output_lines
         if truncated:
@@ -313,6 +350,9 @@ class SafeCommandRunner:
         if safe_runner == "pytest":
             return self.run("pytest", [*targets, *extra_args])
         raise ValueError(f"Unsupported test runner: {runner}")
+
+    def run_validation_command(self, argv: list[str], *, working_dir: str = ".", env_overrides: dict[str, str] | None = None) -> CommandResult:
+        return self.run_argv(argv, working_dir=working_dir, env_overrides=env_overrides)
 
     def format_code(self, formatter: str, paths: list[str], check_only: bool = False) -> CommandResult:
         safe_formatter = formatter.strip()
@@ -335,8 +375,28 @@ class SafeCommandRunner:
             raise ValueError(f"Unsupported command: {safe_command}")
         if any(not item.strip() for item in args):
             raise ValueError("command args may not contain empty values.")
-        if safe_command in {"python", "python3", ".venv/bin/python"}:
+        if safe_command in {
+            "python",
+            "python3",
+            "python3.10",
+            "python3.11",
+            "python3.12",
+            ".venv/bin/python",
+            "venv/bin/python",
+            ".venv/Scripts/python.exe",
+            "venv/Scripts/python.exe",
+        }:
             return safe_command, self._validate_python_args(args)
+        if safe_command == "go":
+            return safe_command, self._validate_go_args(args)
+        if safe_command == "cargo":
+            return safe_command, self._validate_cargo_args(args)
+        if safe_command in PACKAGE_MANAGERS:
+            return safe_command, self._validate_package_manager_args(safe_command, args)
+        if safe_command in BUILD_TOOL_EXECUTABLES:
+            if safe_command in WRAPPER_EXECUTABLES:
+                self._validate_wrapper_command(safe_command)
+            return safe_command, self._validate_build_tool_args(args)
         if safe_command == "pytest":
             return safe_command, self._validate_pytest_args(args)
         if safe_command == "ruff":
@@ -345,7 +405,23 @@ class SafeCommandRunner:
             return safe_command, self._validate_black_args(args)
         raise ValueError(f"Unsupported command: {safe_command}")
 
+    def _execute(self, safe_command: str, safe_args: list[str], *, working_dir: str, env_overrides: dict[str, str] | None = None):
+        executable = sys.executable if safe_command in {"python", "python3"} else safe_command
+        cwd = self._resolve_working_dir(working_dir)
+        env = {**os.environ, **env_overrides} if env_overrides else None
+        return subprocess.run(
+            [executable, *safe_args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=self.timeout_sec,
+            env=env,
+        )
+
     def _validate_python_args(self, args: list[str]) -> list[str]:
+        if args in (["--version"], ["-V"]):
+            return list(args)
         if len(args) < 2 or args[0] != "-m":
             raise ValueError("python commands must use -m with an allowed module.")
         module = args[1].strip()
@@ -360,7 +436,108 @@ class SafeCommandRunner:
             return ["-m", module, *self._validate_ruff_args(remainder)]
         if module == "black":
             return ["-m", module, *self._validate_black_args(remainder)]
+        if module == "venv":
+            return ["-m", module, *self._validate_venv_args(remainder)]
+        if module == "pip":
+            return ["-m", module, *self._validate_pip_args(remainder)]
         raise ValueError(f"Unsupported python module: {module}")
+
+    def _validate_go_args(self, args: list[str]) -> list[str]:
+        if args == ["version"]:
+            return ["version"]
+        if args == ["mod", "download"]:
+            return ["mod", "download"]
+        if not args or args[0] != "test":
+            raise ValueError("go commands must use 'version' or 'test'.")
+        safe_args = ["test"]
+        for arg in args[1:]:
+            normalized = arg.strip()
+            if not normalized:
+                raise ValueError("go args may not contain empty values.")
+            if normalized == "./...":
+                safe_args.append(normalized)
+                continue
+            if normalized.startswith("-"):
+                raise ValueError(f"Unsupported go test argument: {normalized}")
+            safe_args.append(self._validate_repo_relative_path(normalized))
+        return safe_args
+
+    def _validate_cargo_args(self, args: list[str]) -> list[str]:
+        if args == ["--version"]:
+            return ["--version"]
+        if args == ["test"]:
+            return ["test"]
+        if args == ["fetch"]:
+            return ["fetch"]
+        if args == ["fmt"]:
+            return ["fmt"]
+        if args == ["clippy"]:
+            return ["clippy"]
+        if args == ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]:
+            return list(args)
+        raise ValueError("cargo commands must use '--version' or 'test'.")
+
+    def _validate_package_manager_args(self, command: str, args: list[str]) -> list[str]:
+        if args == ["--version"]:
+            return ["--version"]
+        if args == ["test"]:
+            return ["test"]
+        if args == ["install"]:
+            return ["install"]
+        if command == "yarn" and args in (["format"], ["lint"]):
+            return list(args)
+        if command in {"npm", "pnpm"} and args == ["run", "test"]:
+            return ["run", "test"]
+        if command in {"npm", "pnpm"} and args in (["run", "format"], ["run", "lint"]):
+            return list(args)
+        raise ValueError(f"Unsupported {command} arguments.")
+
+    def _validate_build_tool_args(self, args: list[str]) -> list[str]:
+        if args == ["--version"]:
+            return ["--version"]
+        if args == ["test"]:
+            return ["test"]
+        raise ValueError("Build tool commands must use '--version' or 'test'.")
+
+    def _validate_wrapper_command(self, command: str) -> None:
+        candidate = (self.repo_path / command).resolve()
+        if self.repo_path not in candidate.parents:
+            raise ValueError(f"Wrapper command escapes repository root: {command}")
+        if not candidate.exists() or not candidate.is_file():
+            raise ValueError(f"Wrapper command does not exist: {command}")
+
+    def _validate_venv_args(self, args: list[str]) -> list[str]:
+        if len(args) != 1:
+            raise ValueError("venv bootstrap requires exactly one target directory.")
+        target = args[0].strip()
+        if not target:
+            raise ValueError("venv target directory may not be empty.")
+        return [self._validate_repo_relative_path(target)]
+
+    def _validate_pip_args(self, args: list[str]) -> list[str]:
+        if not args:
+            raise ValueError("pip commands may not be empty.")
+        subcommand = args[0].strip()
+        if subcommand != "install":
+            raise ValueError(f"Unsupported pip subcommand: {subcommand}")
+        safe_args = [subcommand]
+        index = 1
+        while index < len(args):
+            arg = args[index].strip()
+            if not arg:
+                raise ValueError("pip args may not contain empty values.")
+            if arg in {"-r", "--requirement", "-e", "--editable"}:
+                if index + 1 >= len(args):
+                    raise ValueError(f"Missing value for pip flag: {arg}")
+                value = args[index + 1].strip()
+                if not value:
+                    raise ValueError(f"Missing value for pip flag: {arg}")
+                safe_args.append(arg)
+                safe_args.append(self._validate_repo_relative_path(value))
+                index += 2
+                continue
+            raise ValueError(f"Unsupported pip install argument: {arg}")
+        return safe_args
 
     def _validate_unittest_args(self, args: list[str]) -> list[str]:
         safe_args: list[str] = []
@@ -458,6 +635,15 @@ class SafeCommandRunner:
         if self.repo_path not in candidate.parents and candidate != self.repo_path:
             raise ValueError(f"Path escapes repository root: {path_arg}")
         return candidate.relative_to(self.repo_path).as_posix()
+
+    def _resolve_working_dir(self, working_dir: str) -> Path:
+        normalized = working_dir.strip() or "."
+        candidate = (self.repo_path / normalized).resolve()
+        if self.repo_path not in candidate.parents and candidate != self.repo_path:
+            raise ValueError(f"Path escapes repository root: {working_dir}")
+        if not candidate.exists() or not candidate.is_dir():
+            raise ValueError(f"Working directory does not exist: {working_dir}")
+        return candidate
 
 
 def format_shell_query(command: str, args: list[str]) -> str:

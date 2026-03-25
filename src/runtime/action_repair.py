@@ -5,6 +5,7 @@ from pathlib import Path
 from ..runtime.memory_manager import AgentMemory
 from ..models import Action, ActionExecutionError
 from ..tools.shell import format_shell_query
+from .validation.failures import VALIDATION_TOOL_NAMES, validation_failure_kind
 from .file_context_helpers import repair_redundant_read
 
 
@@ -24,6 +25,9 @@ def classify_action_exception(action: Action, exc: Exception) -> ActionExecution
         failure_kind = "invalid_input"
     elif "failed" in lowered:
         failure_kind = "tool_error"
+    if action.tool_name in VALIDATION_TOOL_NAMES:
+        failure_kind = validation_failure_kind(action.tool_name, message)
+        retryable = failure_kind == "timeout"
     if action.tool_name in {"rg_probe", "rg_search", "search_code"} and failure_kind == "tool_error":
         retryable = True
     return ActionExecutionFailed(failure_kind=failure_kind, message=message, raw_output=[message], retryable=retryable)
@@ -93,7 +97,15 @@ def fallback_edit_tool_action(memory: AgentMemory) -> Action:
             return Action.tool(step_id=step_id, reason="Need to inspect a likely top-level target before editing.", tool_name="read_file_range", tool_input={"path": "README.md", "start_line": 1, "end_line": 60})
         return Action.tool(step_id=step_id, reason="Need a bounded file list before editing.", tool_name="list_files", tool_input={"paths": ["."], "max_depth": 3, "file_type": "f", "name_glob": "*"})
     if state.changed_files and not state.validation_runs:
-        return Action.tool(step_id=step_id, reason="Need validation after making code changes.", tool_name="run_tests", tool_input={"runner": "unittest", "extra_args": ["discover", "-s", "tests", "-v"]})
+        selected_test = selected_discovered_command(state, "test")
+        if selected_test is not None:
+            return Action.tool(
+                step_id=step_id,
+                reason="Need validation after making code changes using the discovered project test command.",
+                tool_name="run_tests",
+                tool_input={"argv": selected_test.command.argv, "working_dir": selected_test.command.working_dir},
+            )
+        return Action.tool(step_id=step_id, reason="Need validation after making code changes.", tool_name="run_tests", tool_input={})
     target = next(iter(sorted(state.inspected_files)), None) or "README.md"
     return Action.tool(step_id=step_id, reason="Need one more targeted inspection before finishing the edit task.", tool_name="read_file_range", tool_input={"path": target, "start_line": 1, "end_line": 80})
 
@@ -171,14 +183,41 @@ def repair_edit_tool_action(memory: AgentMemory, action: Action) -> Action:
             action.reason = action.reason + " " + repair["reason"]
         return action
     if action.tool_name == "run_tests":
+        if action.tool_input.get("argv"):
+            return action
         runner = str(action.tool_input.get("runner") or "")
         if not runner:
-            action.tool_input = {**action.tool_input, "runner": "unittest", "extra_args": ["discover", "-s", "tests", "-v"]}
-            action.reason = action.reason + " Added a safe unittest discovery default."
+            selected_test = selected_discovered_command(state, "test")
+            if selected_test is not None:
+                action.tool_input = {**action.tool_input, "argv": selected_test.command.argv, "working_dir": selected_test.command.working_dir}
+                action.reason = action.reason + " Repaired missing test runner by using the discovered project test command."
+                return action
         return action
-    if action.tool_name == "format_code" and not action.tool_input.get("paths") and state.changed_files:
-        action.tool_input = {**action.tool_input, "paths": sorted(state.changed_files)}
-        action.reason = action.reason + " Added the changed files as formatter targets."
+    if action.tool_name == "run_command":
+        if action.tool_input.get("argv"):
+            return action
+        command = str(action.tool_input.get("command") or "")
+        args = action.tool_input.get("args") or []
+        if command and args:
+            return action
+        selected_lint = selected_discovered_command(state, "lint")
+        if selected_lint is not None:
+            action.tool_input = {**action.tool_input, "argv": selected_lint.command.argv, "working_dir": selected_lint.command.working_dir}
+            action.reason = action.reason + " Repaired missing command by using the discovered project lint command."
+            return action
+        return action
+    if action.tool_name == "format_code":
+        if action.tool_input.get("argv"):
+            return action
+        if not action.tool_input.get("formatter"):
+            selected_format = selected_discovered_command(state, "format")
+            if selected_format is not None:
+                action.tool_input = {**action.tool_input, "argv": selected_format.command.argv, "working_dir": selected_format.command.working_dir}
+                action.reason = action.reason + " Repaired missing formatter by using the discovered project formatter command."
+                return action
+        if not action.tool_input.get("paths") and state.changed_files:
+            action.tool_input = {**action.tool_input, "paths": sorted(state.changed_files)}
+            action.reason = action.reason + " Added the changed files as formatter targets."
         return action
     if action.tool_name in {"write_file", "apply_patch"}:
         read_target = next(iter(sorted(state.inspected_files)), None)
@@ -194,6 +233,19 @@ def is_editish_action(memory: AgentMemory, action: Action) -> bool:
     if action.tool_name in edit_tools:
         return True
     return is_editish_run(memory)
+
+
+def selected_discovered_command(state, kind: str):
+    discovery = state.validation_discovery
+    if discovery is None:
+        return None
+    if kind == "test":
+        return discovery.selected_test
+    if kind == "lint":
+        return discovery.selected_lint
+    if kind == "format":
+        return discovery.selected_format
+    return None
 
 
 def is_editish_run(memory: AgentMemory) -> bool:

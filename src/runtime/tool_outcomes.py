@@ -137,7 +137,7 @@ def apply_write_outcome(memory: AgentMemory, *, tool_name: str, write_result, su
     return summary
 
 
-def apply_command_outcome(memory: AgentMemory, *, tool_name: str, result: CommandResult) -> str:
+def apply_command_outcome(memory: AgentMemory, *, tool_name: str, result: CommandResult, discovery_state=None) -> str:
     from .observation_analysis import summarize_test_result
 
     rendered = format_shell_query(result.command, result.args)
@@ -157,5 +157,6 @@ def apply_command_outcome(memory: AgentMemory, *, tool_name: str, result: Comman
         validation_note=summary,
         success=result.exit_code == 0,
     )
+    memory.record_validation_discovery_state(discovery_state)
     memory.compact()
     return summary

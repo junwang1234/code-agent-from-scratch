@@ -6,6 +6,7 @@ from .core import ToolExecutionContext, ToolResult
 from .registry import ToolRegistry, build_default_tool_registry
 from .repo_filesystem import RepoFilesystem
 from .shell import SafeCommandRunner, ShellQueryRunner
+from ..runtime.validation import ValidationDiscoveryService
 
 
 class ToolExecutor:
@@ -22,6 +23,7 @@ class ToolExecutor:
         self.repo_filesystem = repo_filesystem or RepoFilesystem(repo_path)
         self.shell_runner = shell_runner or ShellQueryRunner(repo_path)
         self.command_runner = command_runner or SafeCommandRunner(repo_path)
+        self.validation_service = ValidationDiscoveryService()
 
     @property
     def context(self) -> ToolExecutionContext:
@@ -29,6 +31,7 @@ class ToolExecutor:
             repo_filesystem=self.repo_filesystem,
             shell_runner=self.shell_runner,
             command_runner=self.command_runner,
+            validation_service=self.validation_service,
         )
 
     def execute(self, tool_name: str, payload: dict) -> ToolResult:

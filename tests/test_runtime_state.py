@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from src.runtime.memory_manager import AgentMemory
-from src.models import ActionExecutionError, FactItem, FileContext, ReadRange, SuccessCriterionStatus, Task
-from src.runtime.action_execution import ActionExecutor
+from src.models import DiscoveredCommand, FactItem, FileContext, ReadRange, SuccessCriterionStatus, Task, ValidationCommand, ValidationDiscoveryState
 from src.runtime.memory_manager import build_incremental_prompt_state, build_snapshot_prompt_state, create_memory, reduce_memory
 from src.runtime.observation_analysis import facts_from_shell_query, summarize_shell_query
 from src.runtime.tool_outcomes import apply_file_range_outcome
@@ -10,6 +9,15 @@ from src.tools.core import ReadFileRangeToolResult
 from src.tools.shell import ShellQueryResult
 
 from tests.helpers import RepoTestCase, make_edit_plan, make_plan, make_tool_action
+
+
+def _discovered(kind: str, argv: list[str], *, source: str = "repo-hint") -> DiscoveredCommand:
+    return DiscoveredCommand(
+        kind=kind,
+        command=ValidationCommand(kind=kind, argv=argv),
+        source=source,
+        confidence=0.9,
+    )
 
 
 class RuntimeStateTest(RepoTestCase):
@@ -149,7 +157,6 @@ class RuntimeStateTest(RepoTestCase):
         self.assertEqual(state["latest_observation"]["tool"], "rg_probe")
         self.assertEqual(state["latest_observation"]["raw_output"], ["src/auth.py:2:return token"])
         self.assertEqual(state["completed_steps_delta"], ["step_1"])
-        self.assertNotIn("repo_profile", state)
         self.assertNotIn("recent_observations", state)
         self.assertNotIn("task", state)
         self.assertNotIn("goal", state)
@@ -167,3 +174,22 @@ class RuntimeStateTest(RepoTestCase):
         self.assertTrue(memory.state.archived_step_notes)
         self.assertEqual(state["recent_observations"], [])
         self.assertTrue(state["archived_steps"])
+
+    def test_prompt_state_includes_validation_discovery(self) -> None:
+        plan = make_edit_plan("Patch auth flow")
+        memory = create_memory(Task(repo_path=self.repo, question="Patch auth flow"), plan)
+        memory.state.validation_discovery = ValidationDiscoveryState(
+            repo_fingerprint="repo123",
+            selected_test=_discovered("test", ["python", "-m", "unittest", "discover", "-s", "tests", "-v"], source="python-tests-layout"),
+            selected_lint=_discovered("lint", ["python", "-m", "ruff", "check", "."], source="python-ruff"),
+            selected_format=_discovered("format", ["python", "-m", "ruff", "format", "."], source="python-ruff"),
+            blockers=["repo-local virtualenv is not available"],
+            evidence=["tests/ exists", "ruff configuration or dependency detected"],
+        )
+        snapshot = build_snapshot_prompt_state(memory, 3)
+        incremental = build_incremental_prompt_state(memory, 3)
+        self.assertEqual(snapshot["validation_discovery"]["repo_fingerprint"], "repo123")
+        self.assertEqual(snapshot["validation_discovery"]["selected_test"]["argv"][:3], ["python", "-m", "unittest"])
+        self.assertEqual(snapshot["validation_discovery"]["selected_lint"]["source"], "python-ruff")
+        self.assertEqual(snapshot["validation_discovery"]["blockers"], ["repo-local virtualenv is not available"])
+        self.assertEqual(incremental["validation_discovery"]["selected_format"]["rendered"], "python -m ruff format .")

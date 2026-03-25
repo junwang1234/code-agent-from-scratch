@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from src.models import FileContext, ReadRange, Task
+from src.models import DiscoveredCommand, FileContext, ReadRange, Task, ValidationCommand, ValidationDiscoveryState
 from src.runtime.action_repair import fallback_tool_action, pick_script_target, repair_edit_tool_action, repair_tool_action
 from src.runtime.memory_manager import create_memory
 from src.runtime.observation_analysis import facts_from_excerpt, facts_from_tree, summarize_excerpt, summarize_tree
 
 from tests.helpers import RepoTestCase, make_edit_plan, make_plan, make_tool_action
+
+
+def _discovered(kind: str, argv: list[str], *, source: str = "repo-hint") -> DiscoveredCommand:
+    return DiscoveredCommand(
+        kind=kind,
+        command=ValidationCommand(kind=kind, argv=argv),
+        source=source,
+        confidence=0.9,
+    )
 
 
 class RuntimeHelpersTest(RepoTestCase):
@@ -96,3 +105,58 @@ class RuntimeHelpersTest(RepoTestCase):
         action = make_tool_action(step_id="step_2", tool_name="head_file", tool_input={"paths": ["README.md", "app/main.py", "app/routes/auth.py", "extra.py"], "lines": 40}, reason="Probe too many files at once.")
         repaired = repair_tool_action(memory, action)
         self.assertEqual(len(repaired.tool_input["paths"]), 3)
+
+    def test_fallback_edit_validation_runs_tests_directly_when_no_discovery_exists(self) -> None:
+        plan = make_edit_plan("Patch auth flow")
+        memory = create_memory(Task(repo_path=self.repo, question="Patch auth flow"), plan)
+        memory.state.inspected_files.add("app/routes/auth.py")
+        memory.state.changed_files.add("app/routes/auth.py")
+        action = fallback_tool_action(memory)
+        self.assertEqual(action.tool_name, "run_tests")
+        self.assertEqual(action.tool_input, {})
+
+    def test_fallback_edit_validation_uses_discovered_test_command(self) -> None:
+        plan = make_edit_plan("Patch auth flow")
+        memory = create_memory(Task(repo_path=self.repo, question="Patch auth flow"), plan)
+        memory.state.inspected_files.add("app/routes/auth.py")
+        memory.state.changed_files.add("app/routes/auth.py")
+        memory.state.validation_discovery = ValidationDiscoveryState(
+            repo_fingerprint="abc123",
+            selected_test=_discovered("test", ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]),
+        )
+        action = fallback_tool_action(memory)
+        self.assertEqual(action.tool_name, "run_tests")
+        self.assertEqual(action.tool_input["argv"][:3], ["python", "-m", "unittest"])
+
+    def test_repair_edit_tool_action_uses_discovered_test_command(self) -> None:
+        plan = make_edit_plan("Patch auth flow")
+        memory = create_memory(Task(repo_path=self.repo, question="Patch auth flow"), plan)
+        memory.state.validation_discovery = ValidationDiscoveryState(
+            repo_fingerprint="abc123",
+            selected_test=_discovered("test", ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]),
+        )
+        action = make_tool_action(step_id="step_3", tool_name="run_tests", tool_input={}, reason="Validate the change.")
+        repaired = repair_edit_tool_action(memory, action)
+        self.assertEqual(repaired.tool_input["argv"][:3], ["python", "-m", "unittest"])
+
+    def test_repair_format_code_uses_discovered_formatter(self) -> None:
+        plan = make_edit_plan("Patch auth flow")
+        memory = create_memory(Task(repo_path=self.repo, question="Patch auth flow"), plan)
+        memory.state.validation_discovery = ValidationDiscoveryState(
+            repo_fingerprint="abc123",
+            selected_format=_discovered("format", ["python", "-m", "ruff", "format", "."]),
+        )
+        action = make_tool_action(step_id="step_3", tool_name="format_code", tool_input={}, reason="Format the change.")
+        repaired = repair_edit_tool_action(memory, action)
+        self.assertEqual(repaired.tool_input["argv"][:4], ["python", "-m", "ruff", "format"])
+
+    def test_repair_run_command_uses_discovered_lint(self) -> None:
+        plan = make_edit_plan("Patch auth flow")
+        memory = create_memory(Task(repo_path=self.repo, question="Patch auth flow"), plan)
+        memory.state.validation_discovery = ValidationDiscoveryState(
+            repo_fingerprint="abc123",
+            selected_lint=_discovered("lint", ["python", "-m", "ruff", "check", "."]),
+        )
+        action = make_tool_action(step_id="step_3", tool_name="run_command", tool_input={}, reason="Run lint.")
+        repaired = repair_edit_tool_action(memory, action)
+        self.assertEqual(repaired.tool_input["argv"][:4], ["python", "-m", "ruff", "check"])

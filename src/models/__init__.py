@@ -15,10 +15,16 @@ from .memory import SessionState
 from .plan import ExecutionPlan, ExecutionStep, Plan, PlanStep, StructuredPlan
 from .results import RunOutcome, TaskResult, TurnArtifacts
 from .task import Task
+from .validation import (
+    DiscoveredCommand,
+    ValidationCommand,
+    ValidationDiscoveryState,
+)
 
 __all__ = [
     "Action",
     "ActionExecutionError",
+    "DiscoveredCommand",
     "EvidenceItem",
     "FactItem",
     "ExecutionPlan",
@@ -40,5 +46,7 @@ __all__ = [
     "TaskResult",
     "ToolCall",
     "TurnArtifacts",
+    "ValidationCommand",
+    "ValidationDiscoveryState",
     "WriteResult",
 ]

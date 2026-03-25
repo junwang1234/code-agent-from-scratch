@@ -5,6 +5,7 @@ import io
 from typing import TextIO
 
 from ..models import Action, SessionState, StructuredPlan, Task, TaskResult, WriteResult
+from ..runtime.validation.state import collect_validation_blockers, summarize_discovered_command
 
 
 ANSI_RESET = "\x1b[0m"
@@ -110,6 +111,11 @@ class RuntimeReporter:
         self._write(f"[summary] steps: {completed_steps}/{total_steps} completed")
         if elapsed_seconds is not None:
             self._write(f"[summary] elapsed: {self._format_elapsed(elapsed_seconds)}")
+        validation_discovery = memory.validation_discovery
+        selected_test = summarize_discovered_command(validation_discovery.selected_test if validation_discovery else None)
+        selected_lint = summarize_discovered_command(validation_discovery.selected_lint if validation_discovery else None)
+        selected_format = summarize_discovered_command(validation_discovery.selected_format if validation_discovery else None)
+        validation_blockers = collect_validation_blockers(validation_discovery)
         if response.result_kind == "edit":
             changed = ", ".join(response.changed_files[:4]) if response.changed_files else "none"
             validation = response.validation[0] if response.validation else "none"
@@ -124,6 +130,14 @@ class RuntimeReporter:
             self._write(f"[summary] key files: {', '.join(key_files) if key_files else 'none'}")
             self._write(f"[summary] evidence: {evidence_count} items")
             self._write(f"[summary] unknowns: {unknowns}")
+        if selected_test:
+            self._write(f"[summary] selected test: {selected_test}")
+        if selected_lint:
+            self._write(f"[summary] selected lint: {selected_lint}")
+        if selected_format:
+            self._write(f"[summary] selected format: {selected_format}")
+        if validation_blockers:
+            self._write(f"[summary] validation blockers: {'; '.join(validation_blockers)}")
         self._write("")
 
     def _format_elapsed(self, elapsed_seconds: float) -> str:
