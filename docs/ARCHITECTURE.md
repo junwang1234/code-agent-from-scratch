@@ -23,10 +23,12 @@ The repository is organized by responsibility, not by framework or provider.
   - runtime memory updates and compaction
   - action normalization and repair
   - tool outcome interpretation
+  - validation environment discovery, probing, selection, and bootstrap policy
   - turn artifact construction
   - final result composition
 - `src/tools`
   - bounded local repo, search, edit, and command tools
+  - validation environment tools for discovery, probing, and bootstrap
 - `src/presentation`
   - runtime progress reporting
   - final markdown rendering
@@ -69,3 +71,36 @@ Within `runtime`, file names should describe the concrete behavior:
 - `turn_*` for final per-turn artifact shaping
 
 Avoid vague names like `helpers` when the module has a clear responsibility. The current code already uses explicit names such as `action_repair.py`, `file_context_helpers.py`, and `result_composer.py`.
+
+## Validation Subsystem
+
+Validation environment logic now lives in `src/runtime/validation/`.
+
+This subpackage owns:
+
+- resolver-driven discovery across supported ecosystems
+- candidate ranking and stable profile/plan ids
+- cheap probing before default selection
+- bootstrap-plan approval policy and execution orchestration
+- validation-specific prompt-state summaries
+
+Current resolver modules:
+
+- `src/runtime/validation/resolvers/python.py`
+- `src/runtime/validation/resolvers/node.py`
+- `src/runtime/validation/resolvers/go.py`
+- `src/runtime/validation/resolvers/java.py`
+- `src/runtime/validation/resolvers/rust.py`
+- `src/runtime/validation/resolvers/ci_fallback.py`
+
+The planner-facing tool surface for this subsystem is:
+
+- `discover_validation_env`
+- `probe_validation_profile`
+- `bootstrap_validation_env`
+
+Existing command tools also consume discovered validation commands:
+
+- `run_tests` can execute selected profile test argv
+- `format_code` can execute selected profile formatter argv
+- `run_command` can execute selected profile lint argv

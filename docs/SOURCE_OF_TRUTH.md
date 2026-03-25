@@ -58,10 +58,14 @@ Representative files:
 - `src/runtime/action_repair.py`
 - `src/runtime/memory_manager.py`
 - `src/runtime/tool_outcomes.py`
+- `src/runtime/validation/service.py`
+- `src/runtime/validation/resolution.py`
+- `src/runtime/validation/bootstrap.py`
 - `src/runtime/result_composer.py`
 - `src/tools/registry.py`
 - `src/tools/repo_filesystem.py`
 - `src/tools/shell.py`
+- `src/tools/validation_env.py`
 - `src/presentation/responder.py`
 - `src/presentation/runtime_reporter.py`
 
@@ -99,6 +103,7 @@ Important runtime-side components:
 - `observation_analysis.py`: summarization and fact extraction from observed output
 - `turn_artifacts.py`: final per-turn artifacts returned alongside the user-facing result
 - `result_composer.py`: converts runtime state into either an understanding result or an edit result
+- `runtime/validation/*`: validation environment discovery, probe, ranking, and bootstrap orchestration
 
 Runtime event sinks live in `src/runtime/events.py`:
 
@@ -139,6 +144,10 @@ Important working-state types:
 - `SuccessCriterionStatus`
 - `WriteResult`
 - `SessionState`
+- `ValidationProfile`
+- `ValidationCommand`
+- `BootstrapPlan`
+- `ProbeResult`
 
 `SessionState` is the central mutable execution snapshot carried across one bounded run.
 
@@ -195,6 +204,9 @@ Write and validation tools:
 - `run_command`
 - `run_tests`
 - `format_code`
+- `discover_validation_env`
+- `probe_validation_profile`
+- `bootstrap_validation_env`
 
 `finish` is included in the tool schema, but it is handled by the runtime rather than executed through the tool registry.
 
@@ -231,8 +243,8 @@ Command execution safety:
 
 - `SafeCommandRunner` only allows a small executable allowlist
 - Python commands must use `-m` with an allowlisted module
-- `run_tests` only supports `unittest` and `pytest`
-- `format_code` only supports `ruff` and `black`
+- validation commands may also use bounded non-Python executables such as `go`, `cargo`, `npm`, `pnpm`, `yarn`, `mvn`, `gradle`, `./gradlew`, and `./mvnw`
+- `run_tests`, `format_code`, and `run_command` may execute discovered argv from a selected validation profile
 
 Runtime action safety:
 
@@ -248,6 +260,7 @@ Runtime memory construction and mutation live in `src/runtime/memory_manager.py`
 The runtime memory layer is responsible for:
 
 - storing observations, facts, evidence, repo-map entries, file contexts, changed files, validation runs, and failures
+- storing discovered validation candidates, selected validation profile, bootstrap plans, and probe history
 - tracking current-step context and recent completed steps
 - serializing compact prompt state for the planner
 - carrying recent structured action failures and retry counts
